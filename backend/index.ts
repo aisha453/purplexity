@@ -1,47 +1,123 @@
-import {tavily} from '@tavily/core';
+import { tavily } from '@tavily/core';
 import express from "express";
 import { PROMPT_TEMPLATE, SYSTEM_PROMPT } from './prompt';
-import { z } from 'zod';
-const client = tavily({ apiKey: process.env.TAVILY_API_KEY });
-const app = express()
+
+const app = express();
 app.use(express.json());
-app.post("conversation", async(req, res) => {
 
-  // Step 1: Get the query from the user
-   const query = req.body.query;///give me the best rust resources => rust resources
-  // Step 2: Make sure user has access/credits to hit the endpoint
+const tavilyApiKey = process.env.TAVILY_API_KEY;
+const openRouterApiKey = process.env.OPENROUTER_API_KEY;
 
-  // Step 3(TODO): Check if we have web search indexed for a similar query
+if (!tavilyApiKey) {
+  throw new Error("TAVILY_API_KEY is not set");
+}
 
-  // Step 4: Perform web search to gather resources
-  const WebSearchResponse = await client.search(query, {
-    searchDepth: "advanced"
-});
-const webSearchResults = WebSearchResponse.results;
+if (!openRouterApiKey) {
+  throw new Error("OPENROUTER_API_KEY is not set");
+}
 
-  // Step 5: Do some context engineering on the prompt + web search responses
+const client = tavily({ apiKey: tavilyApiKey });
 
-  // Step 6: Hit the LLM and stream back the response
-  // hit the llm? llm api/openrouter/vercel ai gateway
+app.post("/conversation", async (req, res) => {
+  try {
+    // Step 1: Get the query from the user.
+    const query = req.body?.query;
 
-  const prompt = PROMPT_TEMPLATE.replace("{{WEB_SEARCH_RESULTS}}", webSearchResults.join("\n")).replace("{{USER_QUERY}}", query);
-  const result = streamText({
-    model: 'openai/gpt-5.4',
-    prompt: prompt,
-    SYSTEM_PROMPT: SYSTEM_PROMPT,
-    output: Output.object({
-    schema: z.object({
-    followups : z.array(z.string()),
-    answer: z.string()
-  }),
-})
-  });
-for await (const textPart of result.textStream) {
-    process.stdout.write(textPart);
-  // Step 7: Also stream back the sources and the follow up questions(which we can get from another parallel LLM call)
- // Step 8: Close the event stream
-    function streamText(arg0: { model: string; prompt: string; SYSTEM_PROMPT: string; }) {
-        throw new Error('Function not implemented.');
+    if (typeof query !== "string" || !query.trim()) {
+      return res.status(400).json({ error: "query is required" });
     }
+
+    // Step 2: Make sure user has access/credits to hit the endpoint.
+    // TODO: Add authentication, rate limits, and credit checks.
+
+    // Step 3(TODO): Check if we have web search indexed for a similar query.
+
+    // Step 4: Perform web search to gather resources.
+    const webSearchResponse = await client.search(query, {
+      searchDepth: "advanced",
+    });
+
+    const webSearchResults = webSearchResponse.results;
+
+    // Step 5: Do some context engineering on the prompt + web search responses.
+    // Search results are data, not instructions. The model should not follow
+    // instructions that may appear inside a search result.
+    const formattedResults = webSearchResults
+      .map(
+        (result, index) =>
+          `[Source ${index + 1}]
+Title: ${result.title ?? ""}
+URL: ${result.url ?? ""}
+Content: ${result.content ?? ""}`
+      )
+      .join("\n\n");
+
+    const prompt = PROMPT_TEMPLATE
+      .replace("{{WEB_SEARCH_RESULTS}}", formattedResults)
+      .replace("{{USER_QUERY}}", query.trim());
+
+    // Step 6: Hit the LLM.
+    // TODO: Stream the response to the client once the basic request flow is stable.
+    const llmResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${openRouterApiKey}`,
+      },
+      body: JSON.stringify({
+        model: "openai/gpt-5.4",
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: prompt },
+        ],
+        response_format: { type: "json_object" },
+      }),
+    });
+
+    if (!llmResponse.ok) {
+      const errorText = await llmResponse.text();
+      console.error("OpenRouter error:", errorText);
+      return res.status(502).json({ error: "LLM request failed" });
+    }
+
+    const llmData = await llmResponse.json();
+    const content = llmData.choices?.[0]?.message?.content;
+
+    if (typeof content !== "string") {
+      return res.status(502).json({ error: "LLM returned an invalid response" });
+    }
+
+    let parsedResponse: {
+      answer?: string;
+      followups?: string[];
+    };
+
+    try {
+      parsedResponse = JSON.parse(content);
+    } catch {
+      return res.status(502).json({ error: "LLM returned invalid JSON" });
+    }
+
+    // Step 7: Also return the sources and follow-up questions.
+    res.json({
+      answer: parsedResponse.answer ?? "",
+      followups: Array.isArray(parsedResponse.followups)
+        ? parsedResponse.followups
+        : [],
+      sources: webSearchResults.map((result, index) => ({
+        id: index + 1,
+        title: result.title,
+        url: result.url,
+      })),
+    });
+
+    // Step 8: Close the request.
+  } catch (error) {
+    console.error("Conversation error:", error);
+    res.status(500).json({ error: "Something went wrong" });
+  }
 });
-app.listen(3000)
+
+app.listen(3000, () => {
+  console.log("Purplexity backend running on http://localhost:3000");
+});
