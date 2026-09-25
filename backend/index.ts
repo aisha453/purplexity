@@ -104,8 +104,26 @@ Content: ${result.content ?? ""}`
 
     if (!llmResponse.ok) {
       const errorText = await llmResponse.text();
+
+      let geminiMessage = "Gemini could not generate the answer.";
+
+      try {
+        const errorData = JSON.parse(errorText);
+        geminiMessage =
+          errorData?.error?.message ||
+          errorData?.message ||
+          geminiMessage;
+      } catch {
+        if (errorText.trim()) {
+          geminiMessage = errorText.trim().slice(0, 500);
+        }
+      }
+
       console.error("Gemini answer error:", errorText);
-      res.status(502).json({ error: "Gemini could not generate the answer." });
+
+      res.status(502).json({
+        error: `Gemini request failed (${llmResponse.status}): ${geminiMessage}`,
+      });
       return;
     }
 
