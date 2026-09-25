@@ -9,11 +9,11 @@ import {
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
+const GEMINI_MODEL = "gemini-3.1-flash-lite";
 
 app.use(express.json());
 
 // Allow the frontend to call the backend during local development.
-// TODO: Replace "*" with the deployed frontend URL when authentication is added.
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", process.env.FRONTEND_URL || "*");
   res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
@@ -41,27 +41,20 @@ app.post("/conversation", async (req, res) => {
       return;
     }
 
-    // API keys are checked here so the server can still start and expose /health
-    // even when the local environment has not been configured yet.
     const tavilyApiKey = process.env.TAVILY_API_KEY;
-    const openRouterApiKey = process.env.OPENROUTER_API_KEY;
+    const geminiApiKey = process.env.GEMINI_API_KEY;
 
     if (!tavilyApiKey) {
       res.status(500).json({ error: "TAVILY_API_KEY is not configured" });
       return;
     }
 
-    if (!openRouterApiKey) {
-      res.status(500).json({ error: "OPENROUTER_API_KEY is not configured" });
+    if (!geminiApiKey) {
+      res.status(500).json({ error: "GEMINI_API_KEY is not configured" });
       return;
     }
 
-    // Step 2: Make sure user has access/credits to hit the endpoint.
-    // TODO: Add authentication, rate limits, and credit checks.
-
-    // Step 3(TODO): Check if we have web search indexed for a similar query.
-
-    // Step 4: Search the web before asking the LLM to answer.
+    // Step 2: Search the web before asking Gemini to answer.
     const client = tavily({ apiKey: tavilyApiKey });
     const webSearchResponse = await client.search(query.trim(), {
       searchDepth: "advanced",
@@ -69,9 +62,7 @@ app.post("/conversation", async (req, res) => {
 
     const webSearchResults = webSearchResponse.results;
 
-    // Step 5: Turn search results into context for the LLM.
-    // Search results are data, not instructions. The model must not follow
-    // instructions that happen to appear inside a webpage.
+    // Step 3: Turn search results into context for Gemini.
     const formattedResults = webSearchResults
       .map(
         (result, index) =>
@@ -86,9 +77,8 @@ Content: ${result.content ?? ""}`
       .replace("{{WEB_SEARCH_RESULTS}}", formattedResults)
       .replace("{{USER_QUERY}}", query.trim());
 
-    // Step 6: Tell the frontend that the sources are ready before streaming
-    // the answer. This is the basic Perplexity-style flow:
-    // search -> show sources -> stream answer -> generate follow-ups.
+    // Step 4: Start the SSE response so the frontend can receive
+    // sources and streamed answer tokens.
     res.status(200);
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -108,28 +98,34 @@ Content: ${result.content ?? ""}`
       }))
     );
 
-    // Step 7: Stream the answer from OpenRouter.
-    // OpenRouter uses Server-Sent Events (SSE) when stream=true.
-    const llmResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${openRouterApiKey}`,
-      },
-      body: JSON.stringify({
-        model: "openrouter/free",
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: prompt },
-        ],
-        stream: true,
-      }),
-    });
+    // Step 5: Stream the answer directly from the Gemini API.
+    // The free-tier Gemini 3.1 Flash-Lite model is used here.
+    const llmResponse = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": geminiApiKey,
+        },
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [{ text: SYSTEM_PROMPT }],
+          },
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: prompt }],
+            },
+          ],
+        }),
+      }
+    );
 
     if (!llmResponse.ok || !llmResponse.body) {
       const errorText = await llmResponse.text();
-      console.error("OpenRouter streaming error:", errorText);
-      sendEvent("error", { message: "LLM request failed" });
+      console.error("Gemini streaming error:", errorText);
+      sendEvent("error", { message: "Gemini request failed" });
       res.end();
       return;
     }
@@ -138,9 +134,8 @@ Content: ${result.content ?? ""}`
     const decoder = new TextDecoder();
     let buffer = "";
     let answer = "";
-    let streamFinished = false;
 
-    while (!streamFinished) {
+    while (true) {
       const { done, value } = await reader.read();
 
       if (done) {
@@ -163,62 +158,58 @@ Content: ${result.content ?? ""}`
           continue;
         }
 
-        if (data === "[DONE]") {
-          streamFinished = true;
-          break;
-        }
-
         try {
           const chunk = JSON.parse(data);
-          const delta = chunk.choices?.[0]?.delta?.content;
+          const parts = chunk.candidates?.[0]?.content?.parts ?? [];
 
-          if (typeof delta === "string" && delta) {
-            answer += delta;
-            sendEvent("token", delta);
+          for (const part of parts) {
+            if (typeof part.text === "string" && part.text) {
+              answer += part.text;
+              sendEvent("token", part.text);
+            }
           }
         } catch (error) {
-          console.error("Could not parse OpenRouter stream chunk:", error);
+          console.error("Could not parse Gemini stream chunk:", error);
         }
       }
     }
 
-    // Step 8: Generate follow-up questions after the main answer finishes.
-    // This is intentionally a second, small LLM request so the answer can stream
-    // immediately instead of waiting for the follow-ups.
+    // Step 6: Generate follow-up questions with the same free Gemini model.
     const followupPrompt = FOLLOWUP_PROMPT_TEMPLATE
       .replace("{{USER_QUERY}}", query.trim())
       .replace("{{ANSWER}}", answer);
 
     const followupResponse = await fetch(
-      "https://openrouter.ai/api/v1/chat/completions",
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${openRouterApiKey}`,
+          "x-goog-api-key": geminiApiKey,
         },
         body: JSON.stringify({
-          model: "openrouter/free",
-          messages: [
-            { role: "system", content: FOLLOWUP_SYSTEM_PROMPT },
-            { role: "user", content: followupPrompt },
+          systemInstruction: {
+            parts: [{ text: FOLLOWUP_SYSTEM_PROMPT }],
+          },
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: followupPrompt }],
+            },
           ],
-          response_format: {
-            type: "json_schema",
-            json_schema: {
-              name: "purplexity_followups",
-              strict: true,
-              schema: {
-                type: "object",
-                properties: {
-                  followups: {
-                    type: "array",
-                    items: { type: "string" },
+          generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: "OBJECT",
+              properties: {
+                followups: {
+                  type: "ARRAY",
+                  items: {
+                    type: "STRING",
                   },
                 },
-                required: ["followups"],
-                additionalProperties: false,
               },
+              required: ["followups"],
             },
           },
         }),
@@ -229,7 +220,9 @@ Content: ${result.content ?? ""}`
 
     if (followupResponse.ok) {
       const followupData = await followupResponse.json();
-      const content = followupData.choices?.[0]?.message?.content;
+      const content = followupData.candidates?.[0]?.content?.parts
+        ?.map((part: { text?: string }) => part.text ?? "")
+        .join("");
 
       if (typeof content === "string") {
         try {
@@ -237,21 +230,22 @@ Content: ${result.content ?? ""}`
 
           if (Array.isArray(parsed.followups)) {
             followups = parsed.followups.filter(
-              (followup): followup is string => typeof followup === "string"
+              (followup: unknown): followup is string =>
+                typeof followup === "string"
             );
           }
         } catch (error) {
-          console.error("Could not parse follow-up response:", error);
+          console.error("Could not parse Gemini follow-up response:", error);
         }
       }
     } else {
       console.error(
-        "OpenRouter follow-up error:",
+        "Gemini follow-up error:",
         await followupResponse.text()
       );
     }
 
-    // Step 9: Tell the frontend that the whole conversation response is complete.
+    // Step 7: Tell the frontend that the whole response is complete.
     sendEvent("followups", followups);
     sendEvent("done", { answer });
     res.end();
