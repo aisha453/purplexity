@@ -24,7 +24,8 @@ app.post("/conversation", async (req, res) => {
     const query = req.body?.query;
 
     if (typeof query !== "string" || !query.trim()) {
-      return res.status(400).json({ error: "query is required" });
+      res.status(400).json({ error: "query is required" });
+      return;
     }
 
     // Step 2: Make sure user has access/credits to hit the endpoint.
@@ -33,7 +34,7 @@ app.post("/conversation", async (req, res) => {
     // Step 3(TODO): Check if we have web search indexed for a similar query.
 
     // Step 4: Perform web search to gather resources.
-    const webSearchResponse = await client.search(query, {
+    const webSearchResponse = await client.search(query.trim(), {
       searchDepth: "advanced",
     });
 
@@ -70,39 +71,65 @@ Content: ${result.content ?? ""}`
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: prompt },
         ],
-        response_format: { type: "json_object" },
+        // GPT-5.4 supports structured JSON output through response_format.
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "purplexity_response",
+            strict: true,
+            schema: {
+              type: "object",
+              properties: {
+                answer: { type: "string" },
+                followups: {
+                  type: "array",
+                  items: { type: "string" },
+                },
+              },
+              required: ["answer", "followups"],
+              additionalProperties: false,
+            },
+          },
+        },
       }),
     });
 
     if (!llmResponse.ok) {
       const errorText = await llmResponse.text();
       console.error("OpenRouter error:", errorText);
-      return res.status(502).json({ error: "LLM request failed" });
+      res.status(502).json({ error: "LLM request failed" });
+      return;
     }
 
     const llmData = await llmResponse.json();
     const content = llmData.choices?.[0]?.message?.content;
 
     if (typeof content !== "string") {
-      return res.status(502).json({ error: "LLM returned an invalid response" });
+      res.status(502).json({ error: "LLM returned an invalid response" });
+      return;
     }
 
     let parsedResponse: {
-      answer?: string;
-      followups?: string[];
+      answer?: unknown;
+      followups?: unknown;
     };
 
     try {
       parsedResponse = JSON.parse(content);
     } catch {
-      return res.status(502).json({ error: "LLM returned invalid JSON" });
+      res.status(502).json({ error: "LLM returned invalid JSON" });
+      return;
     }
 
     // Step 7: Also return the sources and follow-up questions.
     res.json({
-      answer: parsedResponse.answer ?? "",
+      answer: typeof parsedResponse.answer === "string"
+        ? parsedResponse.answer
+        : "",
       followups: Array.isArray(parsedResponse.followups)
-        ? parsedResponse.followups
+        ? parsedResponse.followups.filter(
+            (followup): followup is string => typeof followup === "string"
+          )
         : [],
       sources: webSearchResults.map((result, index) => ({
         id: index + 1,
