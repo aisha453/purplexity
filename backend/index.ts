@@ -13,7 +13,6 @@ const GEMINI_MODEL = "gemini-3.1-flash-lite";
 
 app.use(express.json());
 
-// Allow the frontend to call the backend during local development.
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", process.env.FRONTEND_URL || "*");
   res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
@@ -33,7 +32,6 @@ app.get("/health", (_req, res) => {
 
 app.post("/conversation", async (req, res) => {
   try {
-    // Step 1: Get and validate the user's query.
     const query = req.body?.query;
 
     if (typeof query !== "string" || !query.trim()) {
@@ -54,15 +52,20 @@ app.post("/conversation", async (req, res) => {
       return;
     }
 
-    // Step 2: Search the web before asking Gemini to answer.
     const client = tavily({ apiKey: tavilyApiKey });
+
     const webSearchResponse = await client.search(query.trim(), {
       searchDepth: "advanced",
     });
 
     const webSearchResults = webSearchResponse.results;
 
-    // Step 3: Turn search results into context for Gemini.
+    const sources = webSearchResults.map((result, index) => ({
+      id: index + 1,
+      title: result.title,
+      url: result.url,
+    }));
+
     const formattedResults = webSearchResults
       .map(
         (result, index) =>
@@ -77,31 +80,8 @@ Content: ${result.content ?? ""}`
       .replace("{{WEB_SEARCH_RESULTS}}", formattedResults)
       .replace("{{USER_QUERY}}", query.trim());
 
-    // Step 4: Start the SSE response so the frontend can receive
-    // sources and streamed answer tokens.
-    res.status(200);
-    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-    res.setHeader("Cache-Control", "no-cache, no-transform");
-    res.setHeader("Connection", "keep-alive");
-    res.flushHeaders();
-
-    const sendEvent = (event: string, data: unknown) => {
-      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    };
-
-    sendEvent(
-      "sources",
-      webSearchResults.map((result, index) => ({
-        id: index + 1,
-        title: result.title,
-        url: result.url,
-      }))
-    );
-
-    // Step 5: Stream the answer directly from the Gemini API.
-    // The free-tier Gemini 3.1 Flash-Lite model is used here.
     const llmResponse = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
       {
         method: "POST",
         headers: {
@@ -122,59 +102,26 @@ Content: ${result.content ?? ""}`
       }
     );
 
-    if (!llmResponse.ok || !llmResponse.body) {
+    if (!llmResponse.ok) {
       const errorText = await llmResponse.text();
-      console.error("Gemini streaming error:", errorText);
-      sendEvent("error", { message: "Gemini request failed" });
-      res.end();
+      console.error("Gemini answer error:", errorText);
+      res.status(502).json({ error: "Gemini could not generate the answer." });
       return;
     }
 
-    const reader = llmResponse.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let answer = "";
+    const llmData = await llmResponse.json();
 
-    while (true) {
-      const { done, value } = await reader.read();
+    const answer = llmData.candidates?.[0]?.content?.parts
+      ?.map((part: { text?: string }) => part.text ?? "")
+      .join("")
+      .trim();
 
-      if (done) {
-        break;
-      }
-
-      buffer += decoder.decode(value, { stream: true });
-
-      const events = buffer.split("\n\n");
-      buffer = events.pop() ?? "";
-
-      for (const eventBlock of events) {
-        const data = eventBlock
-          .split("\n")
-          .filter((line) => line.startsWith("data: "))
-          .map((line) => line.slice(6))
-          .join("\n");
-
-        if (!data) {
-          continue;
-        }
-
-        try {
-          const chunk = JSON.parse(data);
-          const parts = chunk.candidates?.[0]?.content?.parts ?? [];
-
-          for (const part of parts) {
-            if (typeof part.text === "string" && part.text) {
-              answer += part.text;
-              sendEvent("token", part.text);
-            }
-          }
-        } catch (error) {
-          console.error("Could not parse Gemini stream chunk:", error);
-        }
-      }
+    if (!answer) {
+      console.error("Gemini returned no answer:", JSON.stringify(llmData));
+      res.status(502).json({ error: "Gemini returned an empty answer." });
+      return;
     }
 
-    // Step 6: Generate follow-up questions with the same free Gemini model.
     const followupPrompt = FOLLOWUP_PROMPT_TEMPLATE
       .replace("{{USER_QUERY}}", query.trim())
       .replace("{{ANSWER}}", answer);
@@ -245,24 +192,14 @@ Content: ${result.content ?? ""}`
       );
     }
 
-    // Step 7: Tell the frontend that the whole response is complete.
-    sendEvent("followups", followups);
-    sendEvent("done", { answer });
-    res.end();
+    res.json({
+      sources,
+      answer,
+      followups,
+    });
   } catch (error) {
     console.error("Conversation error:", error);
-
-    if (!res.headersSent) {
-      res.status(500).json({ error: "Something went wrong" });
-      return;
-    }
-
-    res.write(
-      `event: error\ndata: ${JSON.stringify({
-        message: "Something went wrong",
-      })}\n\n`
-    );
-    res.end();
+    res.status(500).json({ error: "Something went wrong." });
   }
 });
 
