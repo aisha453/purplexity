@@ -117,7 +117,7 @@ Content: ${result.content ?? ""}`
         Authorization: `Bearer ${openRouterApiKey}`,
       },
       body: JSON.stringify({
-        model: "openai/gpt-5.4",
+        model: "openrouter/free",
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: prompt },
@@ -198,7 +198,7 @@ Content: ${result.content ?? ""}`
           Authorization: `Bearer ${openRouterApiKey}`,
         },
         body: JSON.stringify({
-          model: "openai/gpt-5.4",
+          model: "openrouter/free",
           messages: [
             { role: "system", content: FOLLOWUP_SYSTEM_PROMPT },
             { role: "user", content: followupPrompt },
