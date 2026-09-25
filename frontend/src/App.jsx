@@ -54,6 +54,51 @@ function App() {
       const decoder = new TextDecoder();
       let buffer = "";
 
+      const processBlock = (block) => {
+        let eventName = "message";
+        let dataText = "";
+
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event: ")) {
+            eventName = line.slice(7).trim();
+          }
+
+          if (line.startsWith("data: ")) {
+            dataText += line.slice(6);
+          }
+        }
+
+        if (!dataText) {
+          return;
+        }
+
+        try {
+          const data = JSON.parse(dataText);
+
+          if (eventName === "sources") {
+            setSources(Array.isArray(data) ? data : []);
+          }
+
+          if (eventName === "token" && typeof data === "string") {
+            setAnswer((current) => current + data);
+          }
+
+          if (eventName === "followups") {
+            setFollowups(Array.isArray(data) ? data : []);
+          }
+
+          if (eventName === "done" && typeof data?.answer === "string") {
+            setAnswer(data.answer);
+          }
+
+          if (eventName === "error") {
+            setError(data?.message || "The search failed.");
+          }
+        } catch {
+          // Ignore malformed SSE blocks and continue reading the stream.
+        }
+      };
+
       while (true) {
         const { done, value } = await reader.read();
 
@@ -67,45 +112,14 @@ function App() {
         buffer = blocks.pop() || "";
 
         for (const block of blocks) {
-          let eventName = "message";
-          let dataText = "";
-
-          for (const line of block.split("\n")) {
-            if (line.startsWith("event: ")) {
-              eventName = line.slice(7).trim();
-            }
-
-            if (line.startsWith("data: ")) {
-              dataText += line.slice(6);
-            }
-          }
-
-          if (!dataText) {
-            continue;
-          }
-
-          try {
-            const data = JSON.parse(dataText);
-
-            if (eventName === "sources") {
-              setSources(Array.isArray(data) ? data : []);
-            }
-
-            if (eventName === "token" && typeof data === "string") {
-              setAnswer((current) => current + data);
-            }
-
-            if (eventName === "followups") {
-              setFollowups(Array.isArray(data) ? data : []);
-            }
-
-            if (eventName === "error") {
-              setError(data?.message || "The search failed.");
-            }
-          } catch {
-            // Ignore malformed SSE blocks and continue reading the stream.
-          }
+          processBlock(block);
         }
+      }
+
+      buffer += decoder.decode();
+
+      if (buffer.trim()) {
+        processBlock(buffer);
       }
     } catch (requestError) {
       setError(
