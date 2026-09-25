@@ -3,20 +3,28 @@ import express from "express";
 import { PROMPT_TEMPLATE, SYSTEM_PROMPT } from './prompt';
 
 const app = express();
+const PORT = Number(process.env.PORT) || 3000;
+
 app.use(express.json());
 
-const tavilyApiKey = process.env.TAVILY_API_KEY;
-const openRouterApiKey = process.env.OPENROUTER_API_KEY;
+// Allow the frontend to call the backend during local development.
+// TODO: Replace "*" with the deployed frontend URL when authentication is added.
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", process.env.FRONTEND_URL || "*");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
 
-if (!tavilyApiKey) {
-  throw new Error("TAVILY_API_KEY is not set");
-}
+  if (req.method === "OPTIONS") {
+    res.sendStatus(204);
+    return;
+  }
 
-if (!openRouterApiKey) {
-  throw new Error("OPENROUTER_API_KEY is not set");
-}
+  next();
+});
 
-const client = tavily({ apiKey: tavilyApiKey });
+app.get("/health", (_req, res) => {
+  res.json({ status: "ok" });
+});
 
 app.post("/conversation", async (req, res) => {
   try {
@@ -28,12 +36,28 @@ app.post("/conversation", async (req, res) => {
       return;
     }
 
+    // API keys are checked here so the server can still start and expose /health
+    // even when the local environment has not been configured yet.
+    const tavilyApiKey = process.env.TAVILY_API_KEY;
+    const openRouterApiKey = process.env.OPENROUTER_API_KEY;
+
+    if (!tavilyApiKey) {
+      res.status(500).json({ error: "TAVILY_API_KEY is not configured" });
+      return;
+    }
+
+    if (!openRouterApiKey) {
+      res.status(500).json({ error: "OPENROUTER_API_KEY is not configured" });
+      return;
+    }
+
     // Step 2: Make sure user has access/credits to hit the endpoint.
     // TODO: Add authentication, rate limits, and credit checks.
 
     // Step 3(TODO): Check if we have web search indexed for a similar query.
 
     // Step 4: Perform web search to gather resources.
+    const client = tavily({ apiKey: tavilyApiKey });
     const webSearchResponse = await client.search(query.trim(), {
       searchDepth: "advanced",
     });
@@ -71,7 +95,6 @@ Content: ${result.content ?? ""}`
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: prompt },
         ],
-        // GPT-5.4 supports structured JSON output through response_format.
         response_format: {
           type: "json_schema",
           json_schema: {
@@ -123,9 +146,10 @@ Content: ${result.content ?? ""}`
 
     // Step 7: Also return the sources and follow-up questions.
     res.json({
-      answer: typeof parsedResponse.answer === "string"
-        ? parsedResponse.answer
-        : "",
+      answer:
+        typeof parsedResponse.answer === "string"
+          ? parsedResponse.answer
+          : "",
       followups: Array.isArray(parsedResponse.followups)
         ? parsedResponse.followups.filter(
             (followup): followup is string => typeof followup === "string"
@@ -145,6 +169,6 @@ Content: ${result.content ?? ""}`
   }
 });
 
-app.listen(3000, () => {
-  console.log("Purplexity backend running on http://localhost:3000");
+app.listen(PORT, () => {
+  console.log(`Purplexity backend running on http://localhost:${PORT}`);
 });
