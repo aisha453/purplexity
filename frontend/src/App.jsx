@@ -45,82 +45,15 @@ function App() {
         body: JSON.stringify({ query: trimmedQuery }),
       });
 
-      if (!response.ok || !response.body) {
-        const data = await response.json().catch(() => null);
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
         throw new Error(data?.error || "The search request failed.");
       }
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      const processBlock = (block) => {
-        let eventName = "message";
-        let dataText = "";
-
-        for (const line of block.split("\n")) {
-          if (line.startsWith("event: ")) {
-            eventName = line.slice(7).trim();
-          }
-
-          if (line.startsWith("data: ")) {
-            dataText += line.slice(6);
-          }
-        }
-
-        if (!dataText) {
-          return;
-        }
-
-        try {
-          const data = JSON.parse(dataText);
-
-          if (eventName === "sources") {
-            setSources(Array.isArray(data) ? data : []);
-          }
-
-          if (eventName === "token" && typeof data === "string") {
-            setAnswer((current) => current + data);
-          }
-
-          if (eventName === "followups") {
-            setFollowups(Array.isArray(data) ? data : []);
-          }
-
-          if (eventName === "done" && typeof data?.answer === "string") {
-            setAnswer(data.answer);
-          }
-
-          if (eventName === "error") {
-            setError(data?.message || "The search failed.");
-          }
-        } catch {
-          // Ignore malformed SSE blocks and continue reading the stream.
-        }
-      };
-
-      while (true) {
-        const { done, value } = await reader.read();
-
-        if (done) {
-          break;
-        }
-
-        buffer += decoder.decode(value, { stream: true });
-
-        const blocks = buffer.split("\n\n");
-        buffer = blocks.pop() || "";
-
-        for (const block of blocks) {
-          processBlock(block);
-        }
-      }
-
-      buffer += decoder.decode();
-
-      if (buffer.trim()) {
-        processBlock(buffer);
-      }
+      setSources(Array.isArray(data?.sources) ? data.sources : []);
+      setAnswer(typeof data?.answer === "string" ? data.answer : "");
+      setFollowups(Array.isArray(data?.followups) ? data.followups : []);
     } catch (requestError) {
       setError(
         requestError instanceof Error
