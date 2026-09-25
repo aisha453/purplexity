@@ -4,10 +4,16 @@ This backend powers the Purplexity search flow:
 
 1. Receive a user query.
 2. Search the web with Tavily.
-3. Send the search context to OpenRouter.
-4. Stream the answer back to the frontend with Server-Sent Events (SSE).
-5. Generate follow-up questions after the answer finishes.
+3. Send the search context to Gemini.
+4. Stream the Gemini answer back to the frontend with Server-Sent Events (SSE).
+5. Generate follow-up questions with Gemini.
 6. Send the source list and follow-ups through the same SSE connection.
+
+## AI provider
+
+Purplexity uses the Gemini API with the free-tier `gemini-3.1-flash-lite` model.
+
+Google's Gemini API provides a Free usage tier for eligible models and projects. Higher limits require billing.
 
 ## Install dependencies
 
@@ -21,8 +27,10 @@ Copy `.env.example` to `.env` and add your API keys:
 
 ```env
 TAVILY_API_KEY=your_tavily_api_key
-OPENROUTER_API_KEY=your_openrouter_api_key
+GEMINI_API_KEY=your_gemini_api_key
 ```
+
+Do not commit `.env` or expose API keys in frontend code.
 
 ## Run
 
