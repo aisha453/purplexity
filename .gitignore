@@ -1,0 +1,13 @@
+# Dependencies
+node_modules/
+
+# Local environment variables
+.env
+.env.*
+!.env.example
+
+# Bun
+.bun/
+
+# Logs
+*.log
