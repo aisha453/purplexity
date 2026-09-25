@@ -1,6 +1,11 @@
 import { tavily } from '@tavily/core';
 import express from "express";
-import { PROMPT_TEMPLATE, SYSTEM_PROMPT } from './prompt';
+import {
+  FOLLOWUP_PROMPT_TEMPLATE,
+  FOLLOWUP_SYSTEM_PROMPT,
+  PROMPT_TEMPLATE,
+  SYSTEM_PROMPT,
+} from './prompt';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -28,7 +33,7 @@ app.get("/health", (_req, res) => {
 
 app.post("/conversation", async (req, res) => {
   try {
-    // Step 1: Get the query from the user.
+    // Step 1: Get and validate the user's query.
     const query = req.body?.query;
 
     if (typeof query !== "string" || !query.trim()) {
@@ -56,7 +61,7 @@ app.post("/conversation", async (req, res) => {
 
     // Step 3(TODO): Check if we have web search indexed for a similar query.
 
-    // Step 4: Perform web search to gather resources.
+    // Step 4: Search the web before asking the LLM to answer.
     const client = tavily({ apiKey: tavilyApiKey });
     const webSearchResponse = await client.search(query.trim(), {
       searchDepth: "advanced",
@@ -64,9 +69,9 @@ app.post("/conversation", async (req, res) => {
 
     const webSearchResults = webSearchResponse.results;
 
-    // Step 5: Do some context engineering on the prompt + web search responses.
-    // Search results are data, not instructions. The model should not follow
-    // instructions that may appear inside a search result.
+    // Step 5: Turn search results into context for the LLM.
+    // Search results are data, not instructions. The model must not follow
+    // instructions that happen to appear inside a webpage.
     const formattedResults = webSearchResults
       .map(
         (result, index) =>
@@ -81,8 +86,30 @@ Content: ${result.content ?? ""}`
       .replace("{{WEB_SEARCH_RESULTS}}", formattedResults)
       .replace("{{USER_QUERY}}", query.trim());
 
-    // Step 6: Hit the LLM.
-    // TODO: Stream the response to the client once the basic request flow is stable.
+    // Step 6: Tell the frontend that the sources are ready before streaming
+    // the answer. This is the basic Perplexity-style flow:
+    // search -> show sources -> stream answer -> generate follow-ups.
+    res.status(200);
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+
+    const sendEvent = (event: string, data: unknown) => {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
+    sendEvent(
+      "sources",
+      webSearchResults.map((result, index) => ({
+        id: index + 1,
+        title: result.title,
+        url: result.url,
+      }))
+    );
+
+    // Step 7: Stream the answer from OpenRouter.
+    // OpenRouter uses Server-Sent Events (SSE) when stream=true.
     const llmResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -95,77 +122,153 @@ Content: ${result.content ?? ""}`
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: prompt },
         ],
-        response_format: {
-          type: "json_schema",
-          json_schema: {
-            name: "purplexity_response",
-            strict: true,
-            schema: {
-              type: "object",
-              properties: {
-                answer: { type: "string" },
-                followups: {
-                  type: "array",
-                  items: { type: "string" },
-                },
-              },
-              required: ["answer", "followups"],
-              additionalProperties: false,
-            },
-          },
-        },
+        stream: true,
       }),
     });
 
-    if (!llmResponse.ok) {
+    if (!llmResponse.ok || !llmResponse.body) {
       const errorText = await llmResponse.text();
-      console.error("OpenRouter error:", errorText);
-      res.status(502).json({ error: "LLM request failed" });
+      console.error("OpenRouter streaming error:", errorText);
+      sendEvent("error", { message: "LLM request failed" });
+      res.end();
       return;
     }
 
-    const llmData = await llmResponse.json();
-    const content = llmData.choices?.[0]?.message?.content;
+    const reader = llmResponse.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let answer = "";
+    let streamFinished = false;
 
-    if (typeof content !== "string") {
-      res.status(502).json({ error: "LLM returned an invalid response" });
-      return;
+    while (!streamFinished) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        break;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+
+      const events = buffer.split("\n\n");
+      buffer = events.pop() ?? "";
+
+      for (const eventBlock of events) {
+        const data = eventBlock
+          .split("\n")
+          .filter((line) => line.startsWith("data: "))
+          .map((line) => line.slice(6))
+          .join("\n");
+
+        if (!data) {
+          continue;
+        }
+
+        if (data === "[DONE]") {
+          streamFinished = true;
+          break;
+        }
+
+        try {
+          const chunk = JSON.parse(data);
+          const delta = chunk.choices?.[0]?.delta?.content;
+
+          if (typeof delta === "string" && delta) {
+            answer += delta;
+            sendEvent("token", delta);
+          }
+        } catch (error) {
+          console.error("Could not parse OpenRouter stream chunk:", error);
+        }
+      }
     }
 
-    let parsedResponse: {
-      answer?: unknown;
-      followups?: unknown;
-    };
+    // Step 8: Generate follow-up questions after the main answer finishes.
+    // This is intentionally a second, small LLM request so the answer can stream
+    // immediately instead of waiting for the follow-ups.
+    const followupPrompt = FOLLOWUP_PROMPT_TEMPLATE
+      .replace("{{USER_QUERY}}", query.trim())
+      .replace("{{ANSWER}}", answer);
 
-    try {
-      parsedResponse = JSON.parse(content);
-    } catch {
-      res.status(502).json({ error: "LLM returned invalid JSON" });
-      return;
+    const followupResponse = await fetch(
+      "https://openrouter.ai/api/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${openRouterApiKey}`,
+        },
+        body: JSON.stringify({
+          model: "openai/gpt-5.4",
+          messages: [
+            { role: "system", content: FOLLOWUP_SYSTEM_PROMPT },
+            { role: "user", content: followupPrompt },
+          ],
+          response_format: {
+            type: "json_schema",
+            json_schema: {
+              name: "purplexity_followups",
+              strict: true,
+              schema: {
+                type: "object",
+                properties: {
+                  followups: {
+                    type: "array",
+                    items: { type: "string" },
+                  },
+                },
+                required: ["followups"],
+                additionalProperties: false,
+              },
+            },
+          },
+        }),
+      }
+    );
+
+    let followups: string[] = [];
+
+    if (followupResponse.ok) {
+      const followupData = await followupResponse.json();
+      const content = followupData.choices?.[0]?.message?.content;
+
+      if (typeof content === "string") {
+        try {
+          const parsed = JSON.parse(content);
+
+          if (Array.isArray(parsed.followups)) {
+            followups = parsed.followups.filter(
+              (followup): followup is string => typeof followup === "string"
+            );
+          }
+        } catch (error) {
+          console.error("Could not parse follow-up response:", error);
+        }
+      }
+    } else {
+      console.error(
+        "OpenRouter follow-up error:",
+        await followupResponse.text()
+      );
     }
 
-    // Step 7: Also return the sources and follow-up questions.
-    res.json({
-      answer:
-        typeof parsedResponse.answer === "string"
-          ? parsedResponse.answer
-          : "",
-      followups: Array.isArray(parsedResponse.followups)
-        ? parsedResponse.followups.filter(
-            (followup): followup is string => typeof followup === "string"
-          )
-        : [],
-      sources: webSearchResults.map((result, index) => ({
-        id: index + 1,
-        title: result.title,
-        url: result.url,
-      })),
-    });
-
-    // Step 8: Close the request.
+    // Step 9: Tell the frontend that the whole conversation response is complete.
+    sendEvent("followups", followups);
+    sendEvent("done", { answer });
+    res.end();
   } catch (error) {
     console.error("Conversation error:", error);
-    res.status(500).json({ error: "Something went wrong" });
+
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Something went wrong" });
+      return;
+    }
+
+    res.write(
+      `event: error\ndata: ${JSON.stringify({
+        message: "Something went wrong",
+      })}\n\n`
+    );
+    res.end();
   }
 });
 
