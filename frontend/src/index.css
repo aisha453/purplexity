@@ -6,6 +6,11 @@
   text-rendering: optimizeLegibility;
 }
 
+:root[data-theme="dark"] {
+  color: #f4f4f5;
+  background: #18181b;
+}
+
 * {
   box-sizing: border-box;
 }

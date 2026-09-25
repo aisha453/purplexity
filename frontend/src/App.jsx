@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowUp,
   ExternalLink,
@@ -6,11 +6,70 @@ import {
   LoaderCircle,
   Search,
   Sparkles,
+  Moon,
+  Sun,
 } from "lucide-react";
 import "./App.css";
 
 const BACKEND_URL =
   import.meta.env.VITE_BACKEND_URL || "http://localhost:3000";
+
+function renderInline(text, key) {
+  const pattern = /(\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|`([^`]+)`|\*\*([^*]+)\*\*|\*([^*]+)\*)/g;
+  const parts = [];
+  let cursor = 0;
+  let match;
+
+  while ((match = pattern.exec(text))) {
+    if (match.index > cursor) parts.push(text.slice(cursor, match.index));
+    const partKey = `${key}-${match.index}`;
+    if (match[2]) parts.push(<a key={partKey} href={match[3]} target="_blank" rel="noreferrer">{match[2]}</a>);
+    else if (match[4]) parts.push(<code key={partKey}>{match[4]}</code>);
+    else if (match[5]) parts.push(<strong key={partKey}>{match[5]}</strong>);
+    else parts.push(<em key={partKey}>{match[6]}</em>);
+    cursor = pattern.lastIndex;
+  }
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return parts;
+}
+
+function FormattedAnswer({ content }) {
+  const lines = content.split("\n");
+  const blocks = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) { index += 1; continue; }
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    const unordered = line.match(/^[-*]\s+(.+)$/);
+    const ordered = line.match(/^\d+\.\s+(.+)$/);
+    if (heading) {
+      const Tag = `h${heading[1].length}`;
+      blocks.push(<Tag key={index}>{renderInline(heading[2], index)}</Tag>);
+      index += 1;
+    } else if (unordered || ordered) {
+      const isOrdered = Boolean(ordered);
+      const items = [];
+      while (index < lines.length) {
+        const item = lines[index].match(isOrdered ? /^\d+\.\s+(.+)$/ : /^[-*]\s+(.+)$/);
+        if (!item) break;
+        items.push(<li key={index}>{renderInline(item[1], index)}</li>);
+        index += 1;
+      }
+      const Tag = isOrdered ? "ol" : "ul";
+      blocks.push(<Tag key={`list-${index}`}>{items}</Tag>);
+    } else {
+      const paragraph = [];
+      while (index < lines.length && lines[index].trim() && !/^(#{1,3})\s+|^[-*]\s+|^\d+\.\s+/.test(lines[index])) {
+        paragraph.push(lines[index]);
+        index += 1;
+      }
+      blocks.push(<p key={index}>{renderInline(paragraph.join(" "), index)}</p>);
+    }
+  }
+  return <div className="answer-text">{blocks}</div>;
+}
 
 function App() {
   const [query, setQuery] = useState("");
@@ -20,6 +79,12 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [searched, setSearched] = useState(false);
   const [error, setError] = useState("");
+  const [theme, setTheme] = useState(() => localStorage.getItem("theme") || "light");
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("theme", theme);
+  }, [theme]);
 
   async function search(searchQuery = query) {
     const trimmedQuery = searchQuery.trim();
@@ -80,9 +145,14 @@ function App() {
           <span>Purplexity</span>
         </button>
 
-        <div className="status">
+        <div className="nav-actions">
+          <div className="status">
           <span className="status-dot" />
           AI Search
+          </div>
+          <button className="theme-toggle" type="button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}>
+            {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
+          </button>
         </div>
       </header>
 
@@ -163,7 +233,7 @@ function App() {
 
               <div className="answer-card">
                 {answer ? (
-                  <div className="answer-text">{answer}</div>
+                  <FormattedAnswer content={answer} />
                 ) : loading ? (
                   <div className="answer-loading">
                     <LoaderCircle className="spin" size={18} />

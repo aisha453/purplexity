@@ -14,6 +14,28 @@
   border-bottom: 1px solid #eeeeee;
 }
 
+.nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.theme-toggle {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #e4e4e7;
+  border-radius: 9px;
+  background: #ffffff;
+  color: #52525b;
+  cursor: pointer;
+}
+
+.theme-toggle:hover {
+  background: #f4f4f5;
+}
+
 .brand {
   display: inline-flex;
   align-items: center;
@@ -253,8 +275,23 @@
   color: #27272a;
   font-size: 16px;
   line-height: 1.78;
-  white-space: pre-wrap;
 }
+
+.answer-text > :first-child { margin-top: 0; }
+.answer-text > :last-child { margin-bottom: 0; }
+.answer-text h1, .answer-text h2, .answer-text h3 {
+  color: #18181b;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+}
+.answer-text h1 { font-size: 1.45em; }
+.answer-text h2 { font-size: 1.22em; }
+.answer-text h3 { font-size: 1.08em; }
+.answer-text p { margin: 0 0 14px; }
+.answer-text ul, .answer-text ol { margin: 0 0 14px; padding-left: 24px; }
+.answer-text li + li { margin-top: 5px; }
+.answer-text a { color: #5b36c9; text-decoration: underline; text-underline-offset: 2px; }
+.answer-text code { padding: 2px 5px; border-radius: 4px; background: #f4f4f5; font-size: 0.88em; }
 
 .answer-loading {
   display: flex;
@@ -307,6 +344,62 @@ footer {
   color: #a1a1aa;
   font-size: 12px;
   text-align: center;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+:root[data-theme="dark"] .app,
+:root[data-theme="dark"] .answer-card,
+:root[data-theme="dark"] .search-form,
+:root[data-theme="dark"] .followup,
+:root[data-theme="dark"] .theme-toggle {
+  background: #18181b;
+}
+
+:root[data-theme="dark"] .navbar,
+:root[data-theme="dark"] .answer-card,
+:root[data-theme="dark"] .source-card,
+:root[data-theme="dark"] .followup,
+:root[data-theme="dark"] .theme-toggle {
+  border-color: #3f3f46;
+}
+
+:root[data-theme="dark"] .brand,
+:root[data-theme="dark"] .hero h1,
+:root[data-theme="dark"] .search-form input,
+:root[data-theme="dark"] .answer-text,
+:root[data-theme="dark"] .answer-text h1,
+:root[data-theme="dark"] .answer-text h2,
+:root[data-theme="dark"] .answer-text h3,
+:root[data-theme="dark"] .source-card,
+:root[data-theme="dark"] .followup,
+:root[data-theme="dark"] .theme-toggle {
+  color: #f4f4f5;
+}
+
+:root[data-theme="dark"] .subtitle,
+:root[data-theme="dark"] .eyebrow,
+:root[data-theme="dark"] .status,
+:root[data-theme="dark"] .section-heading,
+:root[data-theme="dark"] .search-icon,
+:root[data-theme="dark"] .answer-loading,
+:root[data-theme="dark"] footer {
+  color: #a1a1aa;
+}
+
+:root[data-theme="dark"] .source-card:hover,
+:root[data-theme="dark"] .followup:hover,
+:root[data-theme="dark"] .theme-toggle:hover {
+  background: #27272a;
+}
+
+:root[data-theme="dark"] .source-index,
+:root[data-theme="dark"] .source-count,
+:root[data-theme="dark"] .answer-text code {
+  background: #27272a;
+  color: #d4d4d8;
 }
 
 @media (max-width: 680px) {
